@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ganpati_user
+      POSTGRES_PASSWORD: change_me
+      POSTGRES_DB: ganpati_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ganpati_user -d ganpati_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://ganpati_user:change_me@db:5432/ganpati_db
+      APP_ENV: development
+      CORS_ORIGINS: http://localhost:3000,http://localhost:8080
+      SOCIETY_WINGS: "A:12,B:12"
+      EXPECTED_TOTAL_FLATS: "28"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # First run:  docker compose exec api alembic upgrade head
+    #             docker compose exec api python -m scripts.seed --with-samples
+
+volumes:
+  pgdata:
