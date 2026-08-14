@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from app.models.enums import PaymentMethod
 from app.schemas.category import ExpenseCategoryRead
@@ -63,10 +70,12 @@ class ExpenseCreate(BaseModel):
     def _title(cls, value: str) -> str:
         return value.strip()
 
-    def resolved_category(self) -> tuple[int | None, str | None]:
+    @model_validator(mode="after")
+    def _require_a_category(self) -> ExpenseCreate:
+        # Omitting both is a client mistake (422), not a missing resource (404).
         if self.category_id is None and self.category_code is None:
             raise ValueError("either category_id or category_code is required")
-        return self.category_id, self.category_code
+        return self
 
 
 class ExpenseUpdate(BaseModel):

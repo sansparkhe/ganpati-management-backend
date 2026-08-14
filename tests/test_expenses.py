@@ -45,10 +45,14 @@ async def test_unknown_category_is_rejected(client, seeded):
 
 
 async def test_missing_category_is_rejected(client, seeded):
+    """Omitting both category_id and category_code is a 422, not a 404."""
     response = await client.post(
         "/api/expenses", json={"title": "Random", "amount": 10, "payment_method": "CASH"}
     )
-    assert response.status_code == 404
+    assert response.status_code == 422
+    body = error_of(response)
+    assert body["error"] == "VALIDATION_ERROR"
+    assert "category_id or category_code" in body["message"]
 
 
 async def test_negative_amount_is_rejected(client, seeded):

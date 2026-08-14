@@ -7,31 +7,32 @@ financial summary and a one-call dashboard for the Flutter app.
 * **Swagger UI** — <http://localhost:8000/docs>
 * **ReDoc** — <http://localhost:8000/redoc>
 * **OpenAPI JSON** — <http://localhost:8000/openapi.json> (importable into Postman / `openapi-generator` for Dart)
+* **[Ganpati-API-Integration.md](Ganpati-API-Integration.md)** — the standalone
+  integration guide to hand to the Flutter developer
 
 ---
 
-## ⚠️ Flat count: 24 configured, 28 in the requirement — please confirm
+## Flat count: 24 — confirmed
 
-`A1..A12` + `B1..B12` = **24 flats**, but the original requirement says **28**.
-**Nothing in this codebase assumes either number.** The structure comes from one
-environment variable:
+`A1..A12` + `B1..B12` = **24 flats**. The "28 flats" figure in the original
+requirement was incorrect and has been confirmed as 24 by the society.
+
+Nothing in the code assumes a number; the structure comes from one environment
+variable, and `EXPECTED_TOTAL_FLATS` is the cross-check:
 
 ```env
 SOCIETY_WINGS=A:12,B:12
-EXPECTED_TOTAL_FLATS=28
+EXPECTED_TOTAL_FLATS=24
 ```
 
-`GET /api/flats/config` reports the mismatch, the seed script prints a warning,
-the server logs it at startup, and `GET /api/dashboard` returns
-`flat_config_warning`. To fix it, pick one and re-run the seed:
+Because the two agree, `GET /api/flats/config` returns
+`matches_expectation: true` and `GET /api/dashboard` returns
+`flat_config_warning: null`. If they ever disagree, the mismatch is reported by
+that endpoint, by the seed script and in the server startup log.
 
-| Correct answer | Change in `.env` |
-|---|---|
-| 28 flats, 14 per wing | `SOCIETY_WINGS=A:14,B:14` |
-| 28 flats, extra wing | `SOCIETY_WINGS=A:12,B:12,C:4` |
-| 24 was right | `EXPECTED_TOTAL_FLATS=24` |
-
-You can also add flats at runtime with `POST /api/flats` or `POST /api/flats/bulk`.
+To add flats later: extend `SOCIETY_WINGS` (e.g. `A:14,B:14`) and re-run
+`python -m scripts.seed` (idempotent), or use `POST /api/flats` /
+`POST /api/flats/bulk` at runtime.
 
 ---
 
@@ -325,7 +326,7 @@ Liveness + a real database round trip. `data.status` is `"ok"` or `"degraded"`.
       "flats_contributed": 2, "flats_pending": 10 }],
   "recent_collections": [ ],
   "recent_expenses": [ ],
-  "flat_config_warning": "24 flats are configured but EXPECTED_TOTAL_FLATS is 28. See GET /api/flats/config."
+  "flat_config_warning": null
 }, "message": "Dashboard data fetched successfully" }
 ```
 
@@ -336,7 +337,7 @@ Errors: `500 INTERNAL_ERROR`.
 ## 3. Flats
 
 ### `GET /api/flats`
-Query: `wing`, `is_active`, `search`. Not paginated (24–28 rows) — fetch once and cache.
+Query: `wing`, `is_active`, `search`. Not paginated (24 rows) — fetch once and cache.
 
 ```json
 { "success": true, "data": {
@@ -364,7 +365,8 @@ All contributions of one flat.
 ```
 
 ### `GET /api/flats/config`
-Reports the 24-vs-28 discrepancy and how to fix it (see the top of this file).
+Reports the configured vs expected flat count and how to fix any mismatch
+(see the top of this file). Currently `matches_expectation: true`.
 
 ### `POST /api/flats` → `201`
 
