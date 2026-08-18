@@ -1,114 +1,88 @@
-"""FastAPI application factory.
+"""FastAPI application entry point.
 
-Deliberately thin: configuration, middleware, error handlers and router
-mounting only. All behaviour lives in routers/ and services/.
+Deliberately thin: it creates the app, wires CORS, mounts the three routers
+and exposes a health check. All behaviour lives in app/routers/.
+
+Run with:  uvicorn app.main:app --reload
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
-from app.core.config import settings
-from app.core.database import dispose_engine
-from app.core.error_handlers import register_error_handlers
-from app.routers import api_router
+from app.database import DATABASE_URL, create_tables, dispose_engine, engine
+from app.routers import collection, expense, user
 
-logging.basicConfig(
-    level=logging.DEBUG if settings.DEBUG else logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
 logger = logging.getLogger("ganpati")
 
-DESCRIPTION = f"""
-Backend for a residential society's **Ganpati festival** management app.
-
-* **Collections** - one row per contribution, editable and fully audited
-* **Expenses** - one row per spend, categorised
-* **Finance** - `remaining_balance` is always calculated, never stored
-* **Dashboard** - one call powers the whole home screen
-
-All responses share the same envelope:
-
-```json
-{{ "success": true, "data": {{ }}, "message": "..." }}
-```
-
-Errors use the same shape with `"success": false` plus a machine readable
-`error` code such as `FLAT_NOT_FOUND`.
-
-Money is stored as `NUMERIC(12,2)` and computed with `Decimal` - never a float.
-Amounts are sent over JSON as plain numbers ({settings.CURRENCY_SYMBOL}2500.00 -> `2500.0`).
-"""
+API_PREFIX = os.getenv("API_PREFIX", "/api")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    logger.info("Starting %s (%s)", settings.APP_NAME, settings.APP_ENV)
-    logger.info(
-        "Society configuration: %s -> %d flats",
-        settings.SOCIETY_WINGS,
-        settings.configured_flat_count,
-    )
-    if not settings.flat_count_matches_expectation:
-        logger.warning(
-            "FLAT COUNT DISCREPANCY: SOCIETY_WINGS produces %d flats but "
-            "EXPECTED_TOTAL_FLATS is %d. Nothing has been assumed - see "
-            "GET %s/flats/config for how to fix it.",
-            settings.configured_flat_count,
-            settings.EXPECTED_TOTAL_FLATS,
-            settings.API_PREFIX,
-        )
+    logger.info("Connecting to %s", DATABASE_URL.rsplit("@", 1)[-1])
+    try:
+        await create_tables()
+        logger.info("Tables ready: TBUSER, TBEXP, TBCOLL")
+    except Exception as exc:  # database not reachable yet
+        # Not fatal on purpose: /docs and /health stay up so the failure is
+        # visible and diagnosable instead of the process dying on boot.
+        logger.error("Could not create tables: %s", exc)
     yield
     await dispose_engine()
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title=settings.APP_NAME,
-        version=settings.APP_VERSION,
-        description=DESCRIPTION,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
-        lifespan=lifespan,
-        contact={"name": "Ganpati Utsav Committee"},
-    )
+app = FastAPI(
+    title=os.getenv("APP_NAME", "Ganpati Utsav Management API"),
+    version=os.getenv("APP_VERSION", "1.0.0"),
+    description=(
+        "Backend for a residential society's Ganpati festival app.\n\n"
+        "* **Users** (`TBUSER`) - committee members\n"
+        "* **Collections** (`TBCOLL`) - one row per contribution received\n"
+        "* **Expenses** (`TBEXP`) - one row per spend\n"
+    ),
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
 
-    # CORS: origins come from the environment. Flutter mobile builds do not send
-    # an Origin header, so this only matters for Flutter Web / browser testing.
-    origins = settings.cors_origin_list
-    if settings.is_production and "*" in origins:
-        raise RuntimeError("CORS_ORIGINS must not be '*' in production")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["X-Total-Count"],
-    )
+origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    register_error_handlers(app)
-    app.include_router(api_router, prefix=settings.API_PREFIX)
-
-    @app.get("/", include_in_schema=False)
-    async def root() -> dict:
-        return {
-            "success": True,
-            "data": {
-                "name": settings.APP_NAME,
-                "version": settings.APP_VERSION,
-                "docs": "/docs",
-                "api_prefix": settings.API_PREFIX,
-            },
-            "message": "Ganpati Utsav backend is running",
-        }
-
-    return app
+app.include_router(user.router, prefix=API_PREFIX)
+app.include_router(collection.router, prefix=API_PREFIX)
+app.include_router(expense.router, prefix=API_PREFIX)
 
 
-app = create_app()
+@app.get("/", tags=["Meta"], summary="Service banner")
+async def root() -> dict:
+    return {
+        "name": app.title,
+        "version": app.version,
+        "docs": "/docs",
+        "api_prefix": API_PREFIX,
+    }
+
+
+@app.get("/health", tags=["Meta"], summary="Liveness probe with a real DB round trip")
+async def health() -> dict:
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        database = "connected"
+    except Exception:
+        database = "unavailable"
+    return {"status": "ok" if database == "connected" else "degraded", "database": database}

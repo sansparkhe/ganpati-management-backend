@@ -1,59 +1,100 @@
-"""Collection (contribution) model.
+"""Collection item model — one row per contribution received.
 
-Each row is ONE transaction. Totals are never stored — they are always
-aggregated from these rows, so history stays editable and auditable.
+Each row is a standalone transaction: the contributor's details are recorded
+on the row itself (owner/tenant name and phone) rather than through a link to
+a flat register.
 """
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from enum import Enum
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, CheckConstraint, String, false, true
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, MoneyType, TimestampMixin
-from app.models.enums import CollectionStatus, PaymentMethod, string_enum
-
-if TYPE_CHECKING:
-    from app.models.flat import Flat
+from app.models.user import Base, MoneyType
 
 
-class Collection(Base, TimestampMixin):
-    __tablename__ = "collections"
+class PaymentMode(str, Enum):
+    """How the money moved.
+
+    Subclasses `str` so FastAPI/Pydantic serialise it as a plain readable
+    string ("UPI") rather than an enum wrapper.
+    """
+
+    CASH = "CASH"
+    UPI = "UPI"
+    BANK_TRANSFER = "BANK_TRANSFER"
+    CHEQUE = "CHEQUE"
+    OTHER = "OTHER"
+
+    @property
+    def label(self) -> str:
+        return "UPI" if self is PaymentMode.UPI else self.value.replace("_", " ").title()
+
+
+class CollectionItem(Base):
+    __tablename__ = "TBCOLL"
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
-        Index("ix_collections_flat_id", "flat_id"),
-        Index("ix_collections_collected_on", "collected_on"),
-        Index("ix_collections_payment_method", "payment_method"),
-        Index("ix_collections_status", "status"),
+        # A tenant payment must say who the tenant is. Written as `NOT is_tenant`
+        # rather than `is_tenant = 0`, which PostgreSQL rejects (no boolean-to-
+        # integer comparison); this form is valid on both PostgreSQL and SQLite.
+        CheckConstraint(
+            "NOT is_tenant OR tenant_name IS NOT NULL",
+            name="tenant_name_required_when_is_tenant",
+        ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # RESTRICT: a flat that has money recorded against it cannot be deleted,
-    # which keeps the financial history consistent.
-    flat_id: Mapped[int] = mapped_column(
-        ForeignKey("flats.id", ondelete="RESTRICT"), nullable=False
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    # --- workflow state ---
+    approved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false(), index=True
     )
+    in_queue: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true(), index=True
+    )
+
+    # --- who paid ---
+    owner_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    is_tenant: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    tenant_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # --- the money ---
     amount: Mapped[Decimal] = mapped_column(MoneyType, nullable=False)
-    payment_method: Mapped[PaymentMethod] = mapped_column(
-        string_enum(PaymentMethod, "payment_method"), nullable=False
-    )
-    status: Mapped[CollectionStatus] = mapped_column(
-        string_enum(CollectionStatus, "collection_status"),
+    payment_mode: Mapped[PaymentMode] = mapped_column(
+        # VARCHAR + CHECK rather than a native PG type, so adding a mode is an
+        # ordinary migration instead of an ALTER TYPE.
+        SAEnum(
+            PaymentMode,
+            name="payment_mode",
+            native_enum=False,
+            length=32,
+            validate_strings=True,
+            values_callable=lambda cls: [member.value for member in cls],
+        ),
         nullable=False,
-        default=CollectionStatus.CONFIRMED,
-        server_default=CollectionStatus.CONFIRMED.value,
+        index=True,
     )
-    # UPI txn id / cheque number / receipt number.
-    reference_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    collected_on: Mapped[date] = mapped_column(Date, nullable=False)
-    # Volunteer who received the money.
-    collected_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # UPI/NEFT reference or cheque number; absent for cash.
+    transaction_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Volunteer physically holding the cash until it is banked.
+    cash_held_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
-    flat: Mapped[Flat] = relationship(back_populates="collections", lazy="joined")
+    # Credentials of whoever recorded the contribution, as specified.
+    username: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    password: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    @property
+    def paid_by(self) -> str:
+        """Who the money actually came from."""
+        return self.tenant_name if self.is_tenant and self.tenant_name else self.owner_name
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
-        return f"<Collection id={self.id} flat_id={self.flat_id} amount={self.amount}>"
+        return f"<CollectionItem id={self.id} owner={self.owner_name!r} amount={self.amount}>"
