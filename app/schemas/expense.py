@@ -20,11 +20,11 @@ class ExpenseCreate(BaseModel):
     expense_name: str = Field(min_length=2, max_length=160, examples=["Decoration material"])
     expense_category: ExpenseCategory = Field(examples=["DECORATION"])
     amount: PositiveMoney
-    username: str = Field(min_length=3, max_length=60, examples=["sunny"])
-    password: str = Field(min_length=1, max_length=128, description="Write-only")
+    name: str = Field(min_length=3, max_length=60, examples=["sunny"])
+    phone_number: str = Field(min_length=1, max_length=128, description="Write-only")
     description: str | None = Field(default=None, examples=["Sai Decorators, bill BILL-104"])
 
-    @field_validator("expense_name", "username")
+    @field_validator("expense_name", "name")
     @classmethod
     def _strip(cls, value: str) -> str:
         return value.strip()
@@ -42,12 +42,12 @@ class ExpenseUpdate(BaseModel):
     expense_category: ExpenseCategory | None = None
     amount: PositiveMoney | None = None
     description: str | None = None
-    username: str | None = Field(default=None, min_length=3, max_length=60)
-    password: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=3, max_length=60)
+    phone_number: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ExpenseRead(BaseModel):
-    """`password` is deliberately absent — it is never returned by the API."""
+    """`phone_number` is deliberately absent — it is never returned by the API."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -56,4 +56,4 @@ class ExpenseRead(BaseModel):
     expense_category: ExpenseCategory
     description: str | None
     amount: Money
-    username: str
+    name: str

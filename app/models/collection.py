@@ -1,100 +1,98 @@
-"""Collection item model — one row per contribution received.
-
-Each row is a standalone transaction: the contributor's details are recorded
-on the row itself (owner/tenant name and phone) rather than through a link to
-a flat register.
-"""
+"""Request/response schemas for TBCOLL."""
 
 from __future__ import annotations
 
-from decimal import Decimal
-from enum import Enum
+import re
 
-from sqlalchemy import Boolean, CheckConstraint, String, false, true
-from sqlalchemy import Enum as SAEnum
-from sqlalchemy.orm import Mapped, mapped_column
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.user import Base, MoneyType
+from app.schemas.expense import Money, PositiveMoney
+import enum
 
-
-class PaymentMode(str, Enum):
-    """How the money moved.
-
-    Subclasses `str` so FastAPI/Pydantic serialise it as a plain readable
-    string ("UPI") rather than an enum wrapper.
-    """
-
+class PaymentMode(str, enum.Enum):
     CASH = "CASH"
     UPI = "UPI"
-    BANK_TRANSFER = "BANK_TRANSFER"
-    CHEQUE = "CHEQUE"
-    OTHER = "OTHER"
 
-    @property
-    def label(self) -> str:
-        return "UPI" if self is PaymentMode.UPI else self.value.replace("_", " ").title()
+_PHONE_RE = re.compile(r"^(\+91[\-\s]?)?[6-9]\d{9}$")
 
 
-class CollectionItem(Base):
-    __tablename__ = "TBCOLL"
-    __table_args__ = (
-        CheckConstraint("amount > 0", name="amount_positive"),
-        # A tenant payment must say who the tenant is. Written as `NOT is_tenant`
-        # rather than `is_tenant = 0`, which PostgreSQL rejects (no boolean-to-
-        # integer comparison); this form is valid on both PostgreSQL and SQLite.
-        CheckConstraint(
-            "NOT is_tenant OR tenant_name IS NOT NULL",
-            name="tenant_name_required_when_is_tenant",
-        ),
-    )
+def _clean_phone(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"[\s\-()]", "", value.strip())
+    if not cleaned:
+        return None
+    if not _PHONE_RE.match(cleaned):
+        raise ValueError("phone_number must be a 10 digit Indian mobile number, optionally +91")
+    return cleaned
 
-    id: Mapped[int] = mapped_column(primary_key=True)
 
-    # --- workflow state ---
-    approved: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=false(), index=True
-    )
-    in_queue: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=true(), index=True
-    )
+class CollectionCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120, examples=["Ramesh Patil"])
+    amount: PositiveMoney
+    payment_mode: PaymentMode = Field(examples=["UPI"])
+    approver_name: str = Field(min_length=3, max_length=60, examples=["sunny"])
+    approver_phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
+    wing: str | None = Field(default=None, max_length=20, examples=["A1", "B2", "C2"])
 
-    # --- who paid ---
-    owner_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
-    is_tenant: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=false()
-    )
-    tenant_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    is_tenant: bool = Field(default=False, description="True when a tenant paid, not the owner")
+    is_external: bool = Field(default=False, description="True when the payer is outside the society")
+    tenant_name: str | None = Field(default=None, max_length=120)
+    phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
+    transaction_id: str | None = Field(default=None, max_length=64, examples=["UPI-8890123"])
+    receiver_name: str | None = Field(default=None, max_length=120)
+    receiver_phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
 
-    # --- the money ---
-    amount: Mapped[Decimal] = mapped_column(MoneyType, nullable=False)
-    payment_mode: Mapped[PaymentMode] = mapped_column(
-        # VARCHAR + CHECK rather than a native PG type, so adding a mode is an
-        # ordinary migration instead of an ALTER TYPE.
-        SAEnum(
-            PaymentMode,
-            name="payment_mode",
-            native_enum=False,
-            length=32,
-            validate_strings=True,
-            values_callable=lambda cls: [member.value for member in cls],
-        ),
-        nullable=False,
-        index=True,
-    )
-    # UPI/NEFT reference or cheque number; absent for cash.
-    transaction_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Volunteer physically holding the cash until it is banked.
-    cash_held_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    _phone = field_validator("phone_number", "receiver_phone_number", "approver_phone_number")(_clean_phone)
 
-    # Credentials of whoever recorded the contribution, as specified.
-    username: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
-    password: Mapped[str] = mapped_column(String(128), nullable=False)
+    @field_validator("name", "tenant_name", "transaction_id", "receiver_name", "approver_name")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value else value
 
-    @property
-    def paid_by(self) -> str:
-        """Who the money actually came from."""
-        return self.tenant_name if self.is_tenant and self.tenant_name else self.owner_name
+    @model_validator(mode="after")
+    def _tenant_needs_name(self) -> CollectionCreate:
+        # Mirrors the ck_TBCOLL_tenant_name_required_when_is_tenant constraint,
+        # so the client gets a 422 instead of a database IntegrityError.
+        if self.is_tenant and not self.tenant_name:
+            raise ValueError("tenant_name is required when is_tenant is true")
+        return self
 
-    def __repr__(self) -> str:  # pragma: no cover - debugging helper
-        return f"<CollectionItem id={self.id} owner={self.owner_name!r} amount={self.amount}>"
+
+class CollectionUpdate(BaseModel):
+    """Partial update — only the fields you send are changed."""
+
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    amount: PositiveMoney | None = None
+    payment_mode: PaymentMode | None = None
+    approver_name: str | None = Field(default=None, min_length=3, max_length=60)
+    approver_phone_number: str | None = Field(default=None, max_length=20)
+    is_tenant: bool | None = None
+    is_external: bool | None = None
+    tenant_name: str | None = Field(default=None, max_length=120)
+    phone_number: str | None = Field(default=None, max_length=20)
+    transaction_id: str | None = Field(default=None, max_length=64)
+    receiver_name: str | None = Field(default=None, max_length=120)
+    receiver_phone_number: str | None = Field(default=None, max_length=20)
+    wing: str | None = Field(default=None, max_length=20)
+
+    _phone = field_validator("phone_number", "receiver_phone_number", "approver_phone_number")(_clean_phone)
+
+
+class CollectionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    is_tenant: bool
+    is_external: bool
+    tenant_name: str | None
+    phone_number: str | None
+    amount: Money
+    payment_mode: PaymentMode
+    transaction_id: str | None
+    receiver_name: str | None
+    receiver_phone_number: str | None
+    approver_name: str
+    approver_phone_number: str | None
+    wing: str | None

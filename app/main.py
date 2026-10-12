@@ -1,6 +1,6 @@
 """FastAPI application entry point.
 
-Deliberately thin: it creates the app, wires CORS, mounts the three routers
+Deliberately thin: it creates the app, wires CORS, mounts the routers
 and exposes a health check. All behaviour lives in app/routers/.
 
 Run with:  uvicorn app.main:app --reload
@@ -12,14 +12,19 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.database import DATABASE_URL, create_tables, dispose_engine, engine
-from app.routers import collection, expense, user
+from app.routers import collection, expense, user, dashboard
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
 logger = logging.getLogger("ganpati")
 
 API_PREFIX = os.getenv("API_PREFIX", "/api")
@@ -30,7 +35,7 @@ async def lifespan(_: FastAPI):
     logger.info("Connecting to %s", DATABASE_URL.rsplit("@", 1)[-1])
     try:
         await create_tables()
-        logger.info("Tables ready: TBUSER, TBEXP, TBCOLL")
+        logger.info("All tables exist or were created successfully")
     except Exception as exc:  # database not reachable yet
         # Not fatal on purpose: /docs and /health stay up so the failure is
         # visible and diagnosable instead of the process dying on boot.
@@ -62,9 +67,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ---------------------------------------------------------------------------
+# Global validation handler: FastAPI/Pydantic return 422 by default when the
+# request payload is missing fields or has wrong types. Return 400 instead,
+# with a readable message.
+# ---------------------------------------------------------------------------
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    messages = []
+    for err in exc.errors():
+        # loc looks like ("body", "field") or ("query", "field"); drop the prefix
+        field = ".".join(
+            str(part) for part in err.get("loc", ()) if part not in ("body", "query", "path")
+        )
+        if err.get("type") == "missing":
+            messages.append(f"{field} is required")
+        elif field:
+            messages.append(f"{field}: {err.get('msg')}")
+        else:
+            messages.append(str(err.get("msg")))
+
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "; ".join(messages) or "Invalid request"},
+    )
+
+
 app.include_router(user.router, prefix=API_PREFIX)
 app.include_router(collection.router, prefix=API_PREFIX)
 app.include_router(expense.router, prefix=API_PREFIX)
+app.include_router(dashboard.router, prefix=API_PREFIX)
 
 
 @app.get("/", tags=["Meta"], summary="Service banner")
@@ -85,4 +118,7 @@ async def health() -> dict:
         database = "connected"
     except Exception:
         database = "unavailable"
-    return {"status": "ok" if database == "connected" else "degraded", "database": database}
+    return {
+        "status": "ok" if database == "connected" else "degraded",
+        "database": database,
+    }
