@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import re
-
+import enum
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.collection import PaymentMode
 from app.schemas.expense import Money, PositiveMoney
 
 _PHONE_RE = re.compile(r"^(\+91[\-\s]?)?[6-9]\d{9}$")
+
+
+class PaymentMode(str, enum.Enum):
+    CASH = "CASH"
+    UPI = "UPI"
 
 
 def _clean_phone(value: str | None) -> str | None:
@@ -24,23 +28,24 @@ def _clean_phone(value: str | None) -> str | None:
 
 
 class CollectionCreate(BaseModel):
-    owner_name: str = Field(min_length=2, max_length=120, examples=["Ramesh Patil"])
+    name: str = Field(min_length=2, max_length=120, examples=["Ramesh Patil"])
     amount: PositiveMoney
     payment_mode: PaymentMode = Field(examples=["UPI"])
-    username: str = Field(min_length=3, max_length=60, examples=["sunny"])
-    password: str = Field(min_length=1, max_length=128, description="Write-only")
+    approver_name: str = Field(min_length=3, max_length=60, examples=["sunny"])
+    approver_phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
+    wing: str | None = Field(default=None, max_length=20, examples=["A1", "B2", "C2"])
 
-    approved: bool = Field(default=False, description="Only approved money counts to totals")
-    in_queue: bool = Field(default=True, description="Awaiting review")
     is_tenant: bool = Field(default=False, description="True when a tenant paid, not the owner")
+    is_external: bool = Field(default=False, description="True when the payer is outside the society")
     tenant_name: str | None = Field(default=None, max_length=120)
     phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
     transaction_id: str | None = Field(default=None, max_length=64, examples=["UPI-8890123"])
-    cash_held_by: str | None = Field(default=None, max_length=120)
+    receiver_name: str | None = Field(default=None, max_length=120)
+    receiver_phone_number: str | None = Field(default=None, max_length=20, examples=["9876543210"])
 
-    _phone = field_validator("phone_number")(_clean_phone)
+    _phone = field_validator("phone_number", "receiver_phone_number", "approver_phone_number")(_clean_phone)
 
-    @field_validator("owner_name", "tenant_name", "transaction_id", "cash_held_by", "username")
+    @field_validator("name", "tenant_name", "transaction_id", "receiver_name", "approver_name")
     @classmethod
     def _strip(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value else value
@@ -57,37 +62,37 @@ class CollectionCreate(BaseModel):
 class CollectionUpdate(BaseModel):
     """Partial update — only the fields you send are changed."""
 
-    owner_name: str | None = Field(default=None, min_length=2, max_length=120)
+    name: str | None = Field(default=None, min_length=2, max_length=120)
     amount: PositiveMoney | None = None
     payment_mode: PaymentMode | None = None
-    username: str | None = Field(default=None, min_length=3, max_length=60)
-    password: str | None = Field(default=None, min_length=1, max_length=128)
-    approved: bool | None = None
-    in_queue: bool | None = None
+    approver_name: str | None = Field(default=None, min_length=3, max_length=60)
+    approver_phone_number: str | None = Field(default=None, max_length=20)
     is_tenant: bool | None = None
+    is_external: bool | None = None
     tenant_name: str | None = Field(default=None, max_length=120)
     phone_number: str | None = Field(default=None, max_length=20)
     transaction_id: str | None = Field(default=None, max_length=64)
-    cash_held_by: str | None = Field(default=None, max_length=120)
+    receiver_name: str | None = Field(default=None, max_length=120)
+    receiver_phone_number: str | None = Field(default=None, max_length=20)
+    wing: str | None = Field(default=None, max_length=20)
 
-    _phone = field_validator("phone_number")(_clean_phone)
+    _phone = field_validator("phone_number", "receiver_phone_number", "approver_phone_number")(_clean_phone)
 
 
 class CollectionRead(BaseModel):
-    """`password` is deliberately absent — it is never returned by the API."""
-
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    approved: bool
-    in_queue: bool
-    owner_name: str
+    name: str
     is_tenant: bool
+    is_external: bool
     tenant_name: str | None
     phone_number: str | None
     amount: Money
     payment_mode: PaymentMode
     transaction_id: str | None
-    cash_held_by: str | None
-    username: str
-    paid_by: str = Field(description="Tenant when is_tenant, otherwise the owner")
+    receiver_name: str | None
+    receiver_phone_number: str | None
+    approver_name: str
+    approver_phone_number: str | None
+    wing: str | None
